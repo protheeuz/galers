@@ -12,7 +12,7 @@ from pygame import mixer
 from sklearn.naive_bayes import GaussianNB
 from sklearn.preprocessing import StandardScaler
 
-ESP32_CAM_IP = ""
+ESP32_CAM_IP = "192.168.43.167"
 ESP32_CAM_PORT = 80
 
 app = Flask(__name__)
@@ -273,7 +273,13 @@ def detech():
 def open():
     detech()
     print("open camera")
-    return redirect("/")
+    data = request.get_json()
+    frame_data = data["frame"]
+
+
+    frame = np.array(frame_data, dtype=np.uint8).reshape(480, 640, 3)
+    result = classify_frame(frame)
+    return redirect, jsonify("/", {"classification": result})
 
 @app.route("/train_classifier")
 def train():
@@ -293,6 +299,8 @@ def classify():
 def get_naive_bayes_result():
     global result_label
     return jsonify({"result": result_label})
+
+@app.route("/capture_frame")
 
 @app.route("/")
 def home():
