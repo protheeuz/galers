@@ -5,9 +5,15 @@ import dlib
 from imutils import face_utils
 import time
 import asyncio
+import http.client
+import urllib
+from io import BytesIO
 from pygame import mixer
 from sklearn.naive_bayes import GaussianNB
 from sklearn.preprocessing import StandardScaler
+
+ESP32_CAM_IP = ""
+ESP32_CAM_PORT = 80
 
 app = Flask(__name__)
 
@@ -16,7 +22,7 @@ no_driver_sound = mixer.Sound('nodriver_audio.wav')
 sleep_sound = mixer.Sound('sleep_sound.wav')
 tired_sound = mixer.Sound('rest_audio.wav')
 
-# Initializing the face detector and landmark detector
+# inisialisasi deteksi wajah & lekungan
 detector = dlib.get_frontal_face_detector()
 predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
 
@@ -26,6 +32,14 @@ scaler = StandardScaler()
 classifier_trained = False
 
 result_label = ""
+
+def get_frame_from_esp32_cam():
+    connection = http.client.HTTPConnection(ESP32_CAM_IP, ESP32_CAM_PORT)
+    connection.request("GET", "/video_feed")
+    response = connection.getresponse()
+    data = response.read()
+    connection.close()
+    return np.asanyarray(bytearray(data), dtype=np.uint8)
 
 
 def train_classifier():
@@ -135,6 +149,7 @@ def detech():
     no_driver_sound_start = time.time()
 
     while True:
+        frame = get_frame_from_esp32_cam()
         _, frame = cap.read()
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         face_frame = frame.copy()
