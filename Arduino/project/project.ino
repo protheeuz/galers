@@ -97,6 +97,7 @@ void setup() {
     return;
   }
 
+  // Mullai mengambil dan mengirimkan frame setiap 5 detik
   while (true) {
     captureAndSendFrame();
     delay(5000);
