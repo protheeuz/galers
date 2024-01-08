@@ -1,4 +1,8 @@
-from flask import Flask,render_template,redirect,jsonify, request
+from datetime import datetime
+from flask import Flask,render_template,redirect,jsonify, request, url_for
+from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
+from flask import current_app
 import cv2
 import numpy as np
 import dlib
@@ -16,6 +20,9 @@ ESP32_CAM_IP = "192.168.43.167"
 ESP32_CAM_PORT = 80
 
 app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///driver_detection.db'
+db = SQLAlchemy(app)
+migrate = Migrate(app, db)
 
 mixer.init()
 no_driver_sound = mixer.Sound('nodriver_audio.wav')
@@ -32,6 +39,19 @@ scaler = StandardScaler()
 classifier_trained = False
 
 result_label = ""
+
+
+# buat kelas untuk hasil deteksi yang disimpan pada database
+class DetectionResult(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    result_type = db.Column(db.String(50), nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # db.create_all()
+
+
+    def __repr__(self):
+        return f'<DetectionResult {self.result_type} at {self.timestamp}>'
 
 def get_frame_from_esp32_cam():
     connection = http.client.HTTPConnection(ESP32_CAM_IP, ESP32_CAM_PORT)
@@ -128,32 +148,49 @@ async def tired():
 
 def detech():
     global result_label
-    # status marking for current state
-    sleep_sound_flag = 0
-    no_driver_sound_flag = 0
-    yawning = 0
-    no_yawn = 0
-    sleep = 0
-    active = 0
-    status = ""
-    color = (0, 0, 0)
-    no_driver=0
-    frame_color = (0, 255, 0)
-    
-    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    # result = None
+    with app.app_context():
+            train_classifier()
+            # result = None
+            # result = classify_frame(frame)
+            # result_label = result
 
-   
-    time.sleep(1)
-    start = time.time()
-    no_driver_time=time.time()
-    no_driver_sound_start = time.time()
+            ## simpan hasil deteksi ke database
+            # detection_result = DetectionResult(result=result)
+            # db.session.add(detection_result)
+            # db.session.commit()
+            # status marking for current state
+            sleep_sound_flag = 0
+            no_driver_sound_flag = 0
+            yawning = 0
+            no_yawn = 0
+            sleep = 0
+            active = 0
+            status = ""
+            color = (0, 0, 0)
+            no_driver=0
+            frame_color = (0, 255, 0)
+            
+            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+
+            time.sleep(1)
+            start = time.time()
+            no_driver_time=time.time()
+            no_driver_sound_start = time.time()
 
     while True:
-        frame = get_frame_from_esp32_cam()
+        # frame = get_frame_from_esp32_cam()
         _, frame = cap.read()
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         face_frame = frame.copy()
         faces = detector(gray, 0)
+
+        # result = classify_frame(frame)
+        # result_label = result
+
+        # detection_result = DetectionResult(result=result)
+        # db.session.add(detection_result)
+        # db.session.commit()
 
         # detected face in faces array
         if faces:
@@ -252,7 +289,12 @@ def detech():
                         no_driver_sound.play()
                         no_driver_sound_start=time.time()
                 no_driver_sound_flag=1
+        # result = classify_frame(frame)
+        # result_label = result    
 
+        # detection_result = DetectionResult(result=result)
+        # db.session.add(detection_result)
+        # db.session.commit()
         cv2.putText(frame, status, (50, 50),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2)
         cv2.imshow("PENGEMUDI", frame)
@@ -267,6 +309,12 @@ def detech():
 
     result = classify_frame(frame)
     result_label = result
+
+    ## simpan hasil deteksi ke database
+    detection_result = DetectionResult(result=result)
+    db.session.add(detection_result)
+    db.session.commit()
+
     return render_template("index.html", result=result_label)
 
 @app.route("/open_camera")
@@ -279,7 +327,8 @@ def open():
 
     frame = np.array(frame_data, dtype=np.uint8).reshape(480, 640, 3)
     result = classify_frame(frame)
-    return redirect, jsonify("/", {"classification": result})
+    detech(frame) #meneruskan frame ke detech
+    return redirect, jsonify("/", {"classification": result_label})
 
 @app.route("/train_classifier")
 def train():
@@ -302,12 +351,49 @@ def get_naive_bayes_result():
 
 @app.route("/capture_frame")
 
+@app.route("/detection_history")
+def detection_history():
+    history = DetectionResult.query.all()
+    return render_template("detection_history.html", history=history)
+
+@app.route("/count_detection", methods=["POST"])
+def count_detections():
+    with app.app_context():
+        try:
+            result_type = request.form['result_type']
+            new_detection = DetectionResult(result_type=result_type)
+            db.session.add(new_detection)
+            db.session.commit()
+            # global result_label
+            # result_label = new_detection.result_type
+        # except KeyError as e:
+        #     return jsonify({'error': f"Error: {e}"}), 400
+
+            sleep_count = DetectionResult.query.filter_by(result_type='Tertidur').count()
+            yawning_count = DetectionResult.query.filter_by(result_type='Menguap').count()
+            active_count = DetectionResult.query.filter_by(result_type='Aman').count()
+    
+        # Kirim response JSON yang berisi data deteksi aktual
+ # Panggil fungsi JavaScript untuk meng-update nilai-nilai di frontend
+            return f"<script>updateCounts({sleep_count}, {yawning_count}, {active_count});</script>"
+        except KeyError as e:
+            return jsonify({'error': f"Error: {e}"}), 400
+
+    # return render_template("index.html", sleep_count=sleep_count, yawning_count=yawning_count, active_count=active_count)
+
 @app.route("/")
 def home():
-    global result_label
-    return render_template("index.html", result=result_label)
+    with app.app_context():
+        sleep_count = DetectionResult.query.filter_by(result_type='Tertidur').count()
+        yawning_count = DetectionResult.query.filter_by(result_type='Menguap').count()
+        active_count = DetectionResult.query.filter_by(result_type='Aman').count()
+        global result_label
+    return render_template("index.html", result=result_label, sleep_count=sleep_count, yawning_count=yawning_count, active_count=active_count)
 
 
 if __name__ == "__main__":
+    with app.app_context():
+        result = DetectionResult.query.all()
+        db.create_all()
     train_classifier()
     app.run(debug=True)
