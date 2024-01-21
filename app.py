@@ -1,3 +1,4 @@
+
 from datetime import datetime
 from flask import Flask,render_template,redirect,jsonify, request, url_for
 from flask_sqlalchemy import SQLAlchemy
@@ -6,6 +7,7 @@ from flask import current_app
 import cv2
 import numpy as np
 import dlib
+import os
 from imutils import face_utils
 import time
 import asyncio
@@ -45,6 +47,8 @@ result_label = ""
 class DetectionResult(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     result_type = db.Column(db.String(50), nullable=False)
+    image_path = db.Column(db.String(255)) ## kolom untuk menyimpan image path
+    result = db.Column(db.String(50)) ## kolom simpan hasil deteksi
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
 
     # db.create_all()
@@ -75,6 +79,8 @@ def extract_features(landmarks):
         for j in range(i+1, 68):
             distance = compute(landmarks[i], landmarks[j])
             features.append(distance)
+            if len(features) == 2:
+                return features
     return features
 
 
@@ -90,10 +96,8 @@ def classify_frame(frame):
             features = extract_features(landmarks)
             features_scaled = scaler.transform([features])
             prediction = nb_classifier.predict(features_scaled)
-            return prediction[0]
-    
+            return prediction[0] 
     return 'active'
-    # return 'unknown'
 
 
 def compute(ptA, ptB):
@@ -151,17 +155,12 @@ def detech():
     # result = None
     with app.app_context():
             train_classifier()
-            # result = None
-            # result = classify_frame(frame)
-            # result_label = result
-
-            ## simpan hasil deteksi ke database
-            # detection_result = DetectionResult(result=result)
-            # db.session.add(detection_result)
-            # db.session.commit()
-            # status marking for current state
             sleep_sound_flag = 0
             no_driver_sound_flag = 0
+            sleep_sound_stop_time = 0
+            capture_count = 0 # simpan jumlah frame yang dicapture
+            capture_folder = os.path.join(current_app.root_path, 'captures') ## folder untuk simpan foto
+            os.makedirs(capture_folder, exist_ok=True)
             yawning = 0
             no_yawn = 0
             sleep = 0
@@ -178,6 +177,10 @@ def detech():
             no_driver_time=time.time()
             no_driver_sound_start = time.time()
 
+
+    # inisialisasi variabel capture_path di luar looping
+    capture_path = None
+
     while True:
         # frame = get_frame_from_esp32_cam()
         _, frame = cap.read()
@@ -187,10 +190,6 @@ def detech():
 
         # result = classify_frame(frame)
         # result_label = result
-
-        # detection_result = DetectionResult(result=result)
-        # db.session.add(detection_result)
-        # db.session.commit()
 
         # detected face in faces array
         if faces:
@@ -245,6 +244,41 @@ def detech():
                     if sleep_sound_flag == 0:
                         sleep_sound.play()
                     sleep_sound_flag = 1
+
+                    # bagian yang ditambahkan
+                    if time.time() - sleep_sound_stop_time > 5:
+                        sleep_sound_stop_time = time.time()
+
+                        # simpan hasil deteksi tidur
+                        result = classify_frame(frame)
+                        result_label = result
+                        if result:
+                            detection_result = DetectionResult(result_type=result)
+
+                            # simpan foto ke folder
+                            capture_filename = f"capture_{capture_count}.jpg"
+                            capture_path = os.path.join(capture_folder, capture_filename)
+                            cv2.imwrite(capture_path, frame)
+
+                            # update path foto
+                            detection_result.image_path = capture_path
+
+                            db.session.add(detection_result)
+                            db.session.commit()
+                            capture_count += 1
+                        # detection_result = DetectionResult(result=result, image_path=capture_path)
+
+                        # ## simpan foto ke folder
+                        # capture_filename = f"capture_{capture_count}.jpg"
+                        # capture_path = os.path.join(capture_folder, capture_filename)
+                        # cv2.imwrite(capture_path, frame)
+
+                        # # update path foto
+                        # detection_result.image_path = capture_path
+
+                        # db.session.add(detection_result)
+                        # db.session.commit()
+                        # capture_count += 1
             else:
                 if (yawning > 20):
                     no_yawn += 1
@@ -263,9 +297,6 @@ def detech():
 
             if (time.time()-start < 60 and no_yawn >= 3):
                 no_yawn = 0
-                # print("tired")
-                # asyncio.run(put_image(frame))
-                # time.sleep(2)
                 asyncio.run(tired())
             elif time.time()-start > 60:
                 start = time.time()
@@ -289,12 +320,6 @@ def detech():
                         no_driver_sound.play()
                         no_driver_sound_start=time.time()
                 no_driver_sound_flag=1
-        # result = classify_frame(frame)
-        # result_label = result    
-
-        # detection_result = DetectionResult(result=result)
-        # db.session.add(detection_result)
-        # db.session.commit()
         cv2.putText(frame, status, (50, 50),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2)
         cv2.imshow("PENGEMUDI", frame)
