@@ -1,4 +1,5 @@
 
+import base64
 from datetime import datetime
 from flask import Flask,render_template,redirect,jsonify, request, url_for
 from flask_sqlalchemy import SQLAlchemy
@@ -169,8 +170,11 @@ def detech():
             color = (0, 0, 0)
             no_driver=0
             frame_color = (0, 255, 0)
+
+            ESP32_CAM_URL = "http://192.168.43.190:8080/video_feed"
             
-            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            # cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            cap = cv2.VideoCapture(ESP32_CAM_URL)
 
             time.sleep(1)
             start = time.time()
@@ -304,6 +308,7 @@ def detech():
             for n in range(0, 68):
                 (x, y) = landmarks[n]
                 cv2.circle(face_frame, (x, y), 1, (255, 255, 255), -1)
+            
         else:
             no_driver+=1
             sleep_sound_flag = 0
@@ -326,6 +331,7 @@ def detech():
         cv2.imshow("68 POINTS", face_frame)
         if (cv2.waitKey(1) & 0xFF == ord('q')):
             break
+
     no_driver_sound.stop()
     sleep_sound.stop()
     tired_sound.stop()
@@ -337,6 +343,15 @@ def detech():
 
     ## simpan hasil deteksi ke database
     detection_result = DetectionResult(result=result)
+
+    # simpan foto ke folder
+    capture_filename = f"capture_{capture_count}.jpg"
+    capture_path = os.path.join(capture_folder, capture_filename)
+    cv2.imwrite(capture_path, frame)
+
+    # update path foto
+    detection_result.image_path = capture_path
+
     db.session.add(detection_result)
     db.session.commit()
 
@@ -354,6 +369,28 @@ def open():
     result = classify_frame(frame)
     detech(frame) #meneruskan frame ke detech
     return redirect, jsonify("/", {"classification": result_label})
+
+@app.route("/save_image", methods=["POST"])
+def save_image():
+    # ambil data gambar dari permintaan POST
+    image_data = request.form.get('image')
+
+    # simpan data gambar ke db
+    save_image_to_db(image_data)
+    return 'Gambar berhasil disimpan.'
+
+def save_image_to_db(image_data):
+    image_path = save_image_to_disk(image_data)
+    new_detection = DetectionResult(result_type='Tertidur', image_path=image_path)
+    db.session.add(new_detection)
+    db.session.commit()
+
+def save_image_to_disk(image_data):
+    path = f'image_{datetime.gmtnow().strftime("%Y%m%d%H%M%S")}.jpg'
+    with open(path, 'wb') as file:
+        file.write(base64.b64decode(image_data))
+
+    return path
 
 @app.route("/train_classifier")
 def train():
