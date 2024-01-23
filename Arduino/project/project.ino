@@ -1,255 +1,558 @@
-#include <WebServer.h>
+#include "esp_camera.h"
 #include <WiFi.h>
-#include <esp32cam.h>
- 
-const char* WIFI_SSID = "sehat";
-const char* WIFI_PASS = "yukbisayuk";
- 
-WebServer server(80);
- 
- 
-static auto loRes = esp32cam::Resolution::find(320, 240);
-static auto midRes = esp32cam::Resolution::find(350, 530);
-static auto hiRes = esp32cam::Resolution::find(800, 600);
-void serveJpg()
-{
-  auto frame = esp32cam::capture();
-  if (frame == nullptr) {
-    Serial.println("CAPTURE FAIL");
-    server.send(503, "", "");
-    return;
+#include "esp_timer.h"
+#include "img_converters.h"
+#include "Arduino.h"
+#include "fb_gfx.h"
+#include "soc/soc.h" //
+#include "soc/rtc_cntl_reg.h"  //
+#include "esp_http_server.h"
+
+
+const char* ssid = "MathtechStudio";
+const char* password = "Bellaciao13";
+
+#define PART_BOUNDARY "123456789000000000000987654321"
+
+
+#define CAMERA_MODEL_AI_THINKER
+
+#if defined(CAMERA_MODEL_WROVER_KIT)
+  #define PWDN_GPIO_NUM    -1
+  #define RESET_GPIO_NUM   -1
+  #define XCLK_GPIO_NUM    21
+  #define SIOD_GPIO_NUM    26
+  #define SIOC_GPIO_NUM    27
+  
+  #define Y9_GPIO_NUM      35
+  #define Y8_GPIO_NUM      34
+  #define Y7_GPIO_NUM      39
+  #define Y6_GPIO_NUM      36
+  #define Y5_GPIO_NUM      19
+  #define Y4_GPIO_NUM      18
+  #define Y3_GPIO_NUM       5
+  #define Y2_GPIO_NUM       4
+  #define VSYNC_GPIO_NUM   25
+  #define HREF_GPIO_NUM    23
+  #define PCLK_GPIO_NUM    22
+
+#elif defined(CAMERA_MODEL_M5STACK_PSRAM)
+  #define PWDN_GPIO_NUM     -1
+  #define RESET_GPIO_NUM    15
+  #define XCLK_GPIO_NUM     27
+  #define SIOD_GPIO_NUM     25
+  #define SIOC_GPIO_NUM     23
+  
+  #define Y9_GPIO_NUM       19
+  #define Y8_GPIO_NUM       36
+  #define Y7_GPIO_NUM       18
+  #define Y6_GPIO_NUM       39
+  #define Y5_GPIO_NUM        5
+  #define Y4_GPIO_NUM       34
+  #define Y3_GPIO_NUM       35
+  #define Y2_GPIO_NUM       32
+  #define VSYNC_GPIO_NUM    22
+  #define HREF_GPIO_NUM     26
+  #define PCLK_GPIO_NUM     21
+
+#elif defined(CAMERA_MODEL_M5STACK_WITHOUT_PSRAM)
+  #define PWDN_GPIO_NUM     -1
+  #define RESET_GPIO_NUM    15
+  #define XCLK_GPIO_NUM     27
+  #define SIOD_GPIO_NUM     25
+  #define SIOC_GPIO_NUM     23
+  
+  #define Y9_GPIO_NUM       19
+  #define Y8_GPIO_NUM       36
+  #define Y7_GPIO_NUM       18
+  #define Y6_GPIO_NUM       39
+  #define Y5_GPIO_NUM        5
+  #define Y4_GPIO_NUM       34
+  #define Y3_GPIO_NUM       35
+  #define Y2_GPIO_NUM       17
+  #define VSYNC_GPIO_NUM    22
+  #define HREF_GPIO_NUM     26
+  #define PCLK_GPIO_NUM     21
+
+#elif defined(CAMERA_MODEL_AI_THINKER)
+  #define PWDN_GPIO_NUM     32
+  #define RESET_GPIO_NUM    -1
+  #define XCLK_GPIO_NUM      0
+  #define SIOD_GPIO_NUM     26
+  #define SIOC_GPIO_NUM     27
+  
+  #define Y9_GPIO_NUM       35
+  #define Y8_GPIO_NUM       34
+  #define Y7_GPIO_NUM       39
+  #define Y6_GPIO_NUM       36
+  #define Y5_GPIO_NUM       21
+  #define Y4_GPIO_NUM       19
+  #define Y3_GPIO_NUM       18
+  #define Y2_GPIO_NUM        5
+  #define VSYNC_GPIO_NUM    25
+  #define HREF_GPIO_NUM     23
+  #define PCLK_GPIO_NUM     22
+#else
+  #error "Camera model not selected"
+#endif
+
+static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
+static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
+static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+
+httpd_handle_t stream_httpd = NULL;
+
+static esp_err_t stream_handler(httpd_req_t *req){
+  camera_fb_t * fb = NULL;
+  esp_err_t res = ESP_OK;
+  size_t _jpg_buf_len = 0;
+  uint8_t * _jpg_buf = NULL;
+  char * part_buf[64];
+  
+  res = httpd_resp_set_hdr(req, "Connection", "close");
+
+  res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
+  if(res != ESP_OK){
+    return res;
   }
-  Serial.printf("CAPTURE OK %dx%d %db\n", frame->getWidth(), frame->getHeight(),
-                static_cast<int>(frame->size()));
- 
-  server.setContentLength(frame->size());
-  server.send(200, "image/jpeg");
-  WiFiClient client = server.client();
-  frame->writeTo(client);
-}
- 
-void handleJpgLo()
-{
-  if (!esp32cam::Camera.changeResolution(loRes)) {
-    Serial.println("SET-LO-RES FAIL");
+
+  while(true){
+    fb = esp_camera_fb_get();
+    if (!fb) {
+      Serial.println("Camera capture failed");
+      res = ESP_FAIL;
+    } else {
+      if(fb->width > 400){
+        if(fb->format != PIXFORMAT_JPEG){
+          bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
+          esp_camera_fb_return(fb);
+          fb = NULL;
+          if(!jpeg_converted){
+            Serial.println("JPEG compression failed");
+            res = ESP_FAIL;
+          }
+        } else {
+          _jpg_buf_len = fb->len;
+          _jpg_buf = fb->buf;
+        }
+      }
+    }
+    if(res == ESP_OK){
+      size_t hlen = snprintf((char *)part_buf, 64, _STREAM_PART, _jpg_buf_len);
+      res = httpd_resp_send_chunk(req, (const char *)part_buf, hlen);
+    }
+    if(res == ESP_OK){
+      res = httpd_resp_send_chunk(req, (const char *)_jpg_buf, _jpg_buf_len);
+    }
+    if(res == ESP_OK){
+      res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
+    }
+    if(fb){
+      esp_camera_fb_return(fb);
+      fb = NULL;
+      _jpg_buf = NULL;
+    } else if(_jpg_buf){
+      free(_jpg_buf);
+      _jpg_buf = NULL;
+    }
+    if(res != ESP_OK){
+      break;
+    }
+    //Serial.printf("MJPG: %uB\n",(uint32_t)(_jpg_buf_len));
   }
-  serveJpg();
-}
- 
-void handleJpgHi()
-{
-  if (!esp32cam::Camera.changeResolution(hiRes)) {
-    Serial.println("SET-HI-RES FAIL");
-  }
-  serveJpg();
-}
- 
-void handleJpgMid()
-{
-  if (!esp32cam::Camera.changeResolution(midRes)) {
-    Serial.println("SET-MID-RES FAIL");
-  }
-  serveJpg();
-}
- 
- 
-void  setup(){
-  Serial.begin(115200);
-  Serial.println();
-  {
-    using namespace esp32cam;
-    Config cfg;
-    cfg.setPins(pins::AiThinker);
-    cfg.setResolution(hiRes);
-    cfg.setBufferCount(2);
-    cfg.setJpeg(80);
- 
-    bool ok = Camera.begin(cfg);
-    Serial.println(ok ? "CAMERA OK" : "CAMERA FAIL");
-  }
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-  }
-  Serial.print("http://");
-  Serial.println(WiFi.localIP());
-  Serial.println("  /cam-lo.jpg");
-  Serial.println("  /cam-hi.jpg");
-  Serial.println("  /cam-mid.jpg");
- 
-  server.on("/cam-lo.jpg", handleJpgLo);
-  server.on("/cam-hi.jpg", handleJpgHi);
-  server.on("/cam-mid.jpg", handleJpgMid);
- 
-  server.begin();
-}
- 
-void loop()
-{
-  server.handleClient();
+  return res;
 }
 
-//#include <Wire.h>
+void startCameraServer(){
+  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+  config.server_port = 80;
+
+  httpd_uri_t index_uri = {
+    .uri       = "/",
+    .method    = HTTP_GET,
+    .handler   = stream_handler,
+    .user_ctx  = NULL
+  };
+  
+  //Serial.printf("Starting web server on port: '%d'\n", config.server_port);
+  if (httpd_start(&stream_httpd, &config) == ESP_OK) {
+    httpd_register_uri_handler(stream_httpd, &index_uri);
+  }
+}
+
+void setup() {
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); //disable brownout detector
+ 
+  Serial.begin(115200);
+  Serial.setDebugOutput(false);
+  
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG; 
+  
+  if(psramFound()){
+    config.frame_size = FRAMESIZE_UXGA;
+    config.jpeg_quality = 10;
+    config.fb_count = 2;
+  } else {
+    config.frame_size = FRAMESIZE_SVGA;
+    config.jpeg_quality = 12;
+    config.fb_count = 1;
+  }
+  
+  // Camera init
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed with error 0x%x", err);
+    return;
+  }
+  // Wi-Fi connection
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println("WiFi connected");
+  
+  Serial.print("Camera Stream Ready! Go to: http://");
+  Serial.print(WiFi.localIP());
+  
+  // Start streaming web server
+  startCameraServer();
+}
+
+void loop() {
+  delay(1);
+}
+
 //#include <WiFi.h>
-////#include <ESPAsyncWebServer.h>
-//#include <ESPAsyncWebSrv.h>
 //#include <HTTPClient.h>
-//#include <ArduinoJson.h>
-//#include "esp_camera.h"
 //
+//// ... (Bagian kode lainnya)
 //
+//const char* flaskServerAddress = "http://alamat_flask_anda:port_flask";  // Ganti dengan alamat dan port Flask Anda
+//const char* flaskEndpoint = "/update_status";  // Ganti dengan endpoint Flask yang sesuai
 //
+//void updateFlaskStatus(const char* status) {
+//  HTTPClient http;
 //
-//int ledPin = 13;
-//int buzzerPin = 9;
-//int vibrationMotorPin = 6;
+//  // Buat URL lengkap
+//  String url = String(flaskServerAddress) + flaskEndpoint;
 //
-//const char *ssid = "sehat";
-//const char *password = "yokbisayok";
+//  http.begin(url);
 //
-//AsyncWebServer server(80);
+//  // Set header
+//  http.addHeader("Content-Type", "application/json");
 //
-//const char *serverFlask = "http://127.0.0.1:5000/capture_frame";
+//  // Persiapkan data JSON
+//  String jsonPayload = "{\"status\":\"" + String(status) + "\"}";
 //
-//void captureAndSendFrame() {
-//    // Ambil gambar dari kamera
-//  camera_fb_t *fb = esp_camera_fb_get();
-//  
-//  if (fb) {
-//    // Ubah gambar menjadi JSON
-//    StaticJsonDocument<20000> doc;
-//    JsonArray frameArray = doc.to<JsonArray>();
-//    
-//    for (size_t i = 0; i < fb->len; i++) {
-//      frameArray.add(fb->buf[i]);
-//    }
+//  // Kirim permintaan POST dengan data JSON
+//  int httpResponseCode = http.POST(jsonPayload);
 //
-//    // Kirim gambar ke server Flask
-//    HTTPClient http;
-//    http.begin(serverFlask);
-//    http.addHeader("Content-Type", "application/json");
-//    int httpResponseCode = http.POST(doc.as<String>());
-//    
-//    if (httpResponseCode > 0) {
-//      Serial.print("Kode respons server: ");
-//      Serial.println(httpResponseCode);
-//      
-//      // Tanggapi jika diperlukan
-//      String response = http.getString();
-//      Serial.println(response);
-//    } else {
-//      Serial.print("Gagal mengirimkan frame. Kode respons: ");
-//      Serial.println(httpResponseCode);
-//    }
-//
-//    // Hapus buffer gambar setelah selesai digunakan
-//    esp_camera_fb_return(fb);
+//  if (httpResponseCode > 0) {
+//    Serial.print("HTTP Response code: ");
+//    Serial.println(httpResponseCode);
 //  } else {
-//    Serial.println("Gagal mengambil frame dari kamera");
-//  }
-//}
-//
-////LiquidCrystal_I2C lcd(0x27, 16, 2);
-//
-//void setup() {
-//  Serial.begin(115200);
-//
-//  // Inisialisasi kamera
-//  camera_config_t config;
-//  config.ledc_channel = LEDC_CHANNEL_0;
-//  config.ledc_timer = LEDC_TIMER_0;
-//  config.pin_d0 = 5;
-//  config.pin_d1 = 18;
-//  config.pin_d2 = 19;
-//  config.pin_d3 = 21;
-//  config.pin_d4 = 36;
-//  config.pin_d5 = 39;
-//  config.pin_d6 = 34;
-//  config.pin_d7 = 35;
-//  config.pin_xclk = 0;
-//  config.pin_pclk = 22;
-//  config.pin_vsync = 25;
-//  config.pin_href = 23;
-//  config.pin_sscb_sda = 26;
-//  config.pin_sscb_scl = 27;
-//  config.pin_pwdn = 32;
-//  config.pin_reset = -1;
-//  config.xclk_freq_hz = 20000000;
-//  config.pixel_format = PIXFORMAT_JPEG;
-//
-//  WiFi.begin(ssid, password);
-//  while (WiFi.status() != WL_CONNECTED) {
-//    
-//    delay(500);
-//    Serial.println("Koneksi ke WiFi...");
-//  }
-//  Serial.println("WiFi terkoneksi");
-//
-//  esp_err_t res = esp_camera_init(&config);
-//  if (res != ESP_OK) {
-//    Serial.printf("Gagal menginisialisasi kamera. Kode kesalahan: %d", res);
-//    return;
+//    Serial.println("HTTP POST request failed");
 //  }
 //
-//  // Mulai mengambil dan mengirimkan frame setiap 5 detik
-//  while (true) {
-//    captureAndSendFrame();
-//    delay(5000);
+//  // Akhiri sesi HTTP
+//  http.end();
+//}
+//
+//void detech() {
+//  // Bagian kode deteksi yang sudah ada
+//
+//  if (resultLabel == "sleep") {
+//    activateVibrationSensor();
+//    activateBuzzer();
+//    activateLED();
+//
+//    // Kirim status 'sleep' ke Flask
+//    updateFlaskStatus("sleep");
+//  } else {
+//    // Matikan sensor getaran, buzzer, dan LED jika tidak dalam kondisi 'sleep'
+//    deactivateAll();
 //  }
 //
-//  Serial.print("IP Address: ");
-//  Serial.println(WiFi.localIP());
-//
-//
-//  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-//  String html = "<html><body><h1>ESP32 IP Address</h1><p>IP Address: " + WiFi.localIP().toString() + "</p></body></html>";
-//  request->send(200, "text/html", html);
-//  });
-//
-//  pinMode(ledPin, OUTPUT);
-//  pinMode(buzzerPin, OUTPUT);
-//  //  pinMode(relayPin, OUTPUT);
-//  pinMode(vibrationMotorPin, OUTPUT);
-//
-//  //  lcd.begin(16, 2);
-//  server.begin();
+//  // Bagian kode deteksi yang sudah ada
 //}
 //
-//void loop() {
-//  if (Serial.available() > 0) {
-//    char data = Serial.read();
-//
-//    // Respons tergantung pada sinyal yang diterima
-//    if (data == '1') {
-//      activateAlarm();
-//    } else {
-//      deactivateAlarm();
-//    }
-//  }
-//}
-//
-//void activateAlarm() {
-//  digitalWrite(ledPin, HIGH);
-//  digitalWrite(buzzerPin, HIGH);
-////  digitalWrite(relayPin, HIGH);
-//  digitalWrite(vibrationMotorPin, HIGH);
-//
-////  lcd.clear();
-////  lcd.print("Terdeteksi kantuk!!!");
-//  delay(2000);
-//
-//  // Matikan alarm setelah beberapa detik (sesuaikan dengan kebutuhan)
-//  deactivateAlarm();
-//}
-//
-//void deactivateAlarm() {
-//  digitalWrite(ledPin, LOW);
-//  digitalWrite(buzzerPin, LOW);
-////  digitalWrite(relayPin, LOW);
-//  digitalWrite(vibrationMotorPin, LOW);
-//
-////  lcd.clear();
-////  lcd.print("Tidak terdeteksi kantuk");
-//}
+//// ... (Bagian kode lainnya)
+
+
+// #include <WebServer.h>
+// #include <WiFi.h>
+// #include <esp32cam.h>
+ 
+// const char* WIFI_SSID = "sehat";
+// const char* WIFI_PASS = "yukbisayuk";
+ 
+// WebServer server(80);
+ 
+ 
+// static auto loRes = esp32cam::Resolution::find(320, 240);
+// static auto midRes = esp32cam::Resolution::find(350, 530);
+// static auto hiRes = esp32cam::Resolution::find(800, 600);
+// void serveJpg()
+// {
+//   auto frame = esp32cam::capture();
+//   if (frame == nullptr) {
+//     Serial.println("CAPTURE FAIL");
+//     server.send(503, "", "");
+//     return;
+//   }
+//   Serial.printf("CAPTURE OK %dx%d %db\n", frame->getWidth(), frame->getHeight(),
+//                 static_cast<int>(frame->size()));
+ 
+//   server.setContentLength(frame->size());
+//   server.send(200, "image/jpeg");
+//   WiFiClient client = server.client();
+//   frame->writeTo(client);
+// }
+ 
+// void handleJpgLo()
+// {
+//   if (!esp32cam::Camera.changeResolution(loRes)) {
+//     Serial.println("SET-LO-RES FAIL");
+//   }
+//   serveJpg();
+// }
+ 
+// void handleJpgHi()
+// {
+//   if (!esp32cam::Camera.changeResolution(hiRes)) {
+//     Serial.println("SET-HI-RES FAIL");
+//   }
+//   serveJpg();
+// }
+ 
+// void handleJpgMid()
+// {
+//   if (!esp32cam::Camera.changeResolution(midRes)) {
+//     Serial.println("SET-MID-RES FAIL");
+//   }
+//   serveJpg();
+// }
+ 
+ 
+// void  setup(){
+//   Serial.begin(115200);
+//   Serial.println();
+//   {
+//     using namespace esp32cam;
+//     Config cfg;
+//     cfg.setPins(pins::AiThinker);
+//     cfg.setResolution(hiRes);
+//     cfg.setBufferCount(2);
+//     cfg.setJpeg(80);
+ 
+//     bool ok = Camera.begin(cfg);
+//     Serial.println(ok ? "CAMERA OK" : "CAMERA FAIL");
+//   }
+//   WiFi.persistent(false);
+//   WiFi.mode(WIFI_STA);
+//   WiFi.begin(WIFI_SSID, WIFI_PASS);
+//   while (WiFi.status() != WL_CONNECTED) {
+//     delay(500);
+//   }
+//   Serial.print("http://");
+//   Serial.println(WiFi.localIP());
+//   Serial.println("  /cam-lo.jpg");
+//   Serial.println("  /cam-hi.jpg");
+//   Serial.println("  /cam-mid.jpg");
+ 
+//   server.on("/cam-lo.jpg", handleJpgLo);
+//   server.on("/cam-hi.jpg", handleJpgHi);
+//   server.on("/cam-mid.jpg", handleJpgMid);
+ 
+//   server.begin();
+// }
+ 
+// void loop()
+// {
+//   server.handleClient();
+// }
+
+// //#include <Wire.h>
+// //#include <WiFi.h>
+// ////#include <ESPAsyncWebServer.h>
+// //#include <ESPAsyncWebSrv.h>
+// //#include <HTTPClient.h>
+// //#include <ArduinoJson.h>
+// //#include "esp_camera.h"
+// //
+// //
+// //
+// //
+// //int ledPin = 13;
+// //int buzzerPin = 9;
+// //int vibrationMotorPin = 6;
+// //
+// //const char *ssid = "sehat";
+// //const char *password = "yokbisayok";
+// //
+// //AsyncWebServer server(80);
+// //
+// //const char *serverFlask = "http://127.0.0.1:5000/capture_frame";
+// //
+// //void captureAndSendFrame() {
+// //    // Ambil gambar dari kamera
+// //  camera_fb_t *fb = esp_camera_fb_get();
+// //  
+// //  if (fb) {
+// //    // Ubah gambar menjadi JSON
+// //    StaticJsonDocument<20000> doc;
+// //    JsonArray frameArray = doc.to<JsonArray>();
+// //    
+// //    for (size_t i = 0; i < fb->len; i++) {
+// //      frameArray.add(fb->buf[i]);
+// //    }
+// //
+// //    // Kirim gambar ke server Flask
+// //    HTTPClient http;
+// //    http.begin(serverFlask);
+// //    http.addHeader("Content-Type", "application/json");
+// //    int httpResponseCode = http.POST(doc.as<String>());
+// //    
+// //    if (httpResponseCode > 0) {
+// //      Serial.print("Kode respons server: ");
+// //      Serial.println(httpResponseCode);
+// //      
+// //      // Tanggapi jika diperlukan
+// //      String response = http.getString();
+// //      Serial.println(response);
+// //    } else {
+// //      Serial.print("Gagal mengirimkan frame. Kode respons: ");
+// //      Serial.println(httpResponseCode);
+// //    }
+// //
+// //    // Hapus buffer gambar setelah selesai digunakan
+// //    esp_camera_fb_return(fb);
+// //  } else {
+// //    Serial.println("Gagal mengambil frame dari kamera");
+// //  }
+// //}
+// //
+// ////LiquidCrystal_I2C lcd(0x27, 16, 2);
+// //
+// //void setup() {
+// //  Serial.begin(115200);
+// //
+// //  // Inisialisasi kamera
+// //  camera_config_t config;
+// //  config.ledc_channel = LEDC_CHANNEL_0;
+// //  config.ledc_timer = LEDC_TIMER_0;
+// //  config.pin_d0 = 5;
+// //  config.pin_d1 = 18;
+// //  config.pin_d2 = 19;
+// //  config.pin_d3 = 21;
+// //  config.pin_d4 = 36;
+// //  config.pin_d5 = 39;
+// //  config.pin_d6 = 34;
+// //  config.pin_d7 = 35;
+// //  config.pin_xclk = 0;
+// //  config.pin_pclk = 22;
+// //  config.pin_vsync = 25;
+// //  config.pin_href = 23;
+// //  config.pin_sscb_sda = 26;
+// //  config.pin_sscb_scl = 27;
+// //  config.pin_pwdn = 32;
+// //  config.pin_reset = -1;
+// //  config.xclk_freq_hz = 20000000;
+// //  config.pixel_format = PIXFORMAT_JPEG;
+// //
+// //  WiFi.begin(ssid, password);
+// //  while (WiFi.status() != WL_CONNECTED) {
+// //    
+// //    delay(500);
+// //    Serial.println("Koneksi ke WiFi...");
+// //  }
+// //  Serial.println("WiFi terkoneksi");
+// //
+// //  esp_err_t res = esp_camera_init(&config);
+// //  if (res != ESP_OK) {
+// //    Serial.printf("Gagal menginisialisasi kamera. Kode kesalahan: %d", res);
+// //    return;
+// //  }
+// //
+// //  // Mulai mengambil dan mengirimkan frame setiap 5 detik
+// //  while (true) {
+// //    captureAndSendFrame();
+// //    delay(5000);
+// //  }
+// //
+// //  Serial.print("IP Address: ");
+// //  Serial.println(WiFi.localIP());
+// //
+// //
+// //  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+// //  String html = "<html><body><h1>ESP32 IP Address</h1><p>IP Address: " + WiFi.localIP().toString() + "</p></body></html>";
+// //  request->send(200, "text/html", html);
+// //  });
+// //
+// //  pinMode(ledPin, OUTPUT);
+// //  pinMode(buzzerPin, OUTPUT);
+// //  //  pinMode(relayPin, OUTPUT);
+// //  pinMode(vibrationMotorPin, OUTPUT);
+// //
+// //  //  lcd.begin(16, 2);
+// //  server.begin();
+// //}
+// //
+// //void loop() {
+// //  if (Serial.available() > 0) {
+// //    char data = Serial.read();
+// //
+// //    // Respons tergantung pada sinyal yang diterima
+// //    if (data == '1') {
+// //      activateAlarm();
+// //    } else {
+// //      deactivateAlarm();
+// //    }
+// //  }
+// //}
+// //
+// //void activateAlarm() {
+// //  digitalWrite(ledPin, HIGH);
+// //  digitalWrite(buzzerPin, HIGH);
+// ////  digitalWrite(relayPin, HIGH);
+// //  digitalWrite(vibrationMotorPin, HIGH);
+// //
+// ////  lcd.clear();
+// ////  lcd.print("Terdeteksi kantuk!!!");
+// //  delay(2000);
+// //
+// //  // Matikan alarm setelah beberapa detik (sesuaikan dengan kebutuhan)
+// //  deactivateAlarm();
+// //}
+// //
+// //void deactivateAlarm() {
+// //  digitalWrite(ledPin, LOW);
+// //  digitalWrite(buzzerPin, LOW);
+// ////  digitalWrite(relayPin, LOW);
+// //  digitalWrite(vibrationMotorPin, LOW);
+// //
+// ////  lcd.clear();
+// ////  lcd.print("Tidak terdeteksi kantuk");
+// //}
