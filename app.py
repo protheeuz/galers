@@ -1,32 +1,54 @@
 
 import base64
 from datetime import datetime
-from flask import Flask,render_template,redirect,jsonify, request, url_for
+from flask import Flask, Response,render_template,redirect,jsonify, request, url_for
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from flask import current_app
+from sqlalchemy import text
 import cv2
 import numpy as np
 import dlib
 import os
+import pytz
+import requests
 from imutils import face_utils
 import time
 import asyncio
 import http.client
-import urllib
+import urllib3
+from urllib3.util.retry import Retry
 from io import BytesIO
 from pygame import mixer
 from sklearn.naive_bayes import GaussianNB
 from sklearn.preprocessing import StandardScaler
 
-ESP32_CAM_IP = "192.168.43.167"
-ESP32_CAM_PORT = 80
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///driver_detection.db'
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 
+ESP32_CAM_IP = '192.168.18.21'
+ESP32_CAM_PORT = 80
+ESP32_CAM_URL = f'http://{ESP32_CAM_IP}:{ESP32_CAM_PORT}'
+
+jakarta_timezone = pytz.timezone('Asia/Jakarta')
+
+
+# retry_strategy = Retry(
+#     total=3,
+#     backoff_factor=0.1,
+#     status_forcelist=[429, 500, 502, 503, 504],
+#     allowed_methods=["HEAD", "GET", "POST", "OPTIONS"]
+# )
+
+# http = urllib3.PoolManager(retries=retry_strategy)
+
+# response = requests.get(ESP32_CAM_URL, timeout=20)
+
+
+# frame_data = response.data
 mixer.init()
 no_driver_sound = mixer.Sound('nodriver_audio.wav')
 sleep_sound = mixer.Sound('sleep_sound.wav')
@@ -44,13 +66,23 @@ classifier_trained = False
 result_label = ""
 
 
+
+# try:
+#     response = requests.get(ESP32_CAM_URL, retries=3) #timeout 10
+#     frame_data = response.content
+    
+# except requests.exceptions.ReadTimeout as e:
+#     print(f"Error: {e}")
+
+
+
 # buat kelas untuk hasil deteksi yang disimpan pada database
 class DetectionResult(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     result_type = db.Column(db.String(50), nullable=False)
     image_path = db.Column(db.String(255)) ## kolom untuk menyimpan image path
     result = db.Column(db.String(50)) ## kolom simpan hasil deteksi
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    timestamp = db.Column(db.DateTime(timezone =True), server_default=text('now()'))
 
     # db.create_all()
 
@@ -59,12 +91,16 @@ class DetectionResult(db.Model):
         return f'<DetectionResult {self.result_type} at {self.timestamp}>'
 
 def get_frame_from_esp32_cam():
-    connection = http.client.HTTPConnection(ESP32_CAM_IP, ESP32_CAM_PORT)
-    connection.request("GET", "/video_feed")
-    response = connection.getresponse()
-    data = response.read()
-    connection.close()
-    return np.asanyarray(bytearray(data), dtype=np.uint8)
+    try:
+        response = requests.get(f'http://{ESP32_CAM_IP}:{ESP32_CAM_PORT}')
+        frame_data = response.content
+        frame_array = np.frombuffer(frame_data, dtype=np.uint8)
+        # frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return frame
+    except Exception as e:
+        print(f"Error reading frame from ESP32-CAM: {e}")
+        return None
 
 
 def train_classifier():
@@ -87,6 +123,10 @@ def extract_features(landmarks):
 
 
 def classify_frame(frame):
+    if frame is None:
+        print("Error: Gagal mengambil citra gambar dari frame")
+        return 'active'
+    
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     faces = detector(gray, 0)
 
@@ -152,7 +192,7 @@ async def tired():
 
 
 def detech():
-    global result_label
+    global result_label, ESP32_CAM_IP, ESP32_CAM_PORT
     # result = None
     with app.app_context():
             train_classifier()
@@ -171,10 +211,9 @@ def detech():
             no_driver=0
             frame_color = (0, 255, 0)
 
-            ESP32_CAM_URL = "http://192.168.43.190:8080/video_feed"
-            
-            # cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-            cap = cv2.VideoCapture(ESP32_CAM_URL)
+          
+            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            # cap = cv2.VideoCapture(ESP32_CAM_URL)
 
             time.sleep(1)
             start = time.time()
@@ -186,14 +225,20 @@ def detech():
     capture_path = None
 
     while True:
-        # frame = get_frame_from_esp32_cam()
+        frame = get_frame_from_esp32_cam()
+        if frame is None:
+            break
         _, frame = cap.read()
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if not _:
+            print("Error reading frame from ESP32-CAM.")
+        if frame.shape[2] == 3:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        else:
+            print("Warning: Invalid color channels in the frame.")
+            continue
         face_frame = frame.copy()
         faces = detector(gray, 0)
 
-        # result = classify_frame(frame)
-        # result_label = result
 
         # detected face in faces array
         if faces:
@@ -270,6 +315,8 @@ def detech():
                             db.session.add(detection_result)
                             db.session.commit()
                             capture_count += 1
+                        if result_label == 'sleep':
+                            response = requests.get(ESP32_CAM_URL)   
                         # detection_result = DetectionResult(result=result, image_path=capture_path)
 
                         # ## simpan foto ke folder
@@ -328,9 +375,11 @@ def detech():
         cv2.putText(frame, status, (50, 50),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2)
         cv2.imshow("PENGEMUDI", frame)
-        cv2.imshow("68 POINTS", face_frame)
+        cv2.imshow("LANDMARKS WAJAH", face_frame)
         if (cv2.waitKey(1) & 0xFF == ord('q')):
             break
+        
+  
 
     no_driver_sound.stop()
     sleep_sound.stop()
@@ -359,16 +408,26 @@ def detech():
 
 @app.route("/open_camera")
 def open():
+    global ESP32_CAM_IP, ESP32_CAM_PORT
+    ESP_CAM_URL = f'http://{ESP32_CAM_IP}:{ESP32_CAM_PORT}'
+    timeout = 60
+    frame = requests.get(ESP_CAM_URL)
+    if frame is None or frame.empty():
+        return "Error: Gagal mengambil citra gambar dari frame"
     detech()
     print("open camera")
     data = request.get_json()
-    frame_data = data["frame"]
+    response = requests.get(ESP_CAM_URL)
+    frame_data = response.content
+    
+    
+    # frame_data = data["frame"]
 
 
     frame = np.array(frame_data, dtype=np.uint8).reshape(480, 640, 3)
     result = classify_frame(frame)
     detech(frame) #meneruskan frame ke detech
-    return redirect, jsonify("/", {"classification": result_label})
+    return redirect, jsonify, Response("/", {"classification": result_label}, open_camera(), mimetype='multipart/x-mixed-replace; boundary=frame', content_type='multipart/x-mixed-replace; boundary=frame', status=200, direct_passthrough=True, timeout=timeout)
 
 @app.route("/save_image", methods=["POST"])
 def save_image():
@@ -436,12 +495,31 @@ def count_detections():
             active_count = DetectionResult.query.filter_by(result_type='Aman').count()
     
         # Kirim response JSON yang berisi data deteksi aktual
- # Panggil fungsi JavaScript untuk meng-update nilai-nilai di frontend
+        # Panggil fungsi JavaScript untuk meng-update nilai-nilai di frontend
             return f"<script>updateCounts({sleep_count}, {yawning_count}, {active_count});</script>"
         except KeyError as e:
             return jsonify({'error': f"Error: {e}"}), 400
 
     # return render_template("index.html", sleep_count=sleep_count, yawning_count=yawning_count, active_count=active_count)
+
+@app.route('/start_detection')
+def start_detection():
+    # mendapatkan hasil deteksi dari model
+    detech()
+    return jsonify({'result': result_label})
+    # menyampaikan signal ke ESP
+def send_signal_to_esp32(result):
+    if result == 'sleep':
+        requests.get(f'http://{ESP32_CAM_IP}:{ESP32_CAM_PORT}/activate_sensors')
+
+# @app.route('/update_status', methods=['POST'])
+# def update_status():
+#     data = request.get_json()
+#     status = data.get('status', 'unknown')
+    
+#     # Lakukan sesuatu dengan status yang diterima (misalnya, simpan ke database)
+    
+#     return 'Status updated successfully'
 
 @app.route("/")
 def home():
