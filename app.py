@@ -29,23 +29,10 @@ app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///driver_detection.db'
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 
-ESP32_CAM_IP = '192.168.18.21'
-ESP32_CAM_PORT = 80
-ESP32_CAM_URL = f'http://{ESP32_CAM_IP}:{ESP32_CAM_PORT}'
+ESP32_CAM_IP = '192.168.192.212'
 
 jakarta_timezone = pytz.timezone('Asia/Jakarta')
 
-
-# retry_strategy = Retry(
-#     total=3,
-#     backoff_factor=0.1,
-#     status_forcelist=[429, 500, 502, 503, 504],
-#     allowed_methods=["HEAD", "GET", "POST", "OPTIONS"]
-# )
-
-# http = urllib3.PoolManager(retries=retry_strategy)
-
-# response = requests.get(ESP32_CAM_URL, timeout=20)
 
 
 # frame_data = response.data
@@ -67,15 +54,6 @@ result_label = ""
 
 
 
-# try:
-#     response = requests.get(ESP32_CAM_URL, retries=3) #timeout 10
-#     frame_data = response.content
-    
-# except requests.exceptions.ReadTimeout as e:
-#     print(f"Error: {e}")
-
-
-
 # buat kelas untuk hasil deteksi yang disimpan pada database
 class DetectionResult(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -92,7 +70,7 @@ class DetectionResult(db.Model):
 
 def get_frame_from_esp32_cam():
     try:
-        response = requests.get(f'http://{ESP32_CAM_IP}:{ESP32_CAM_PORT}')
+        response = requests.get(f'http://{ESP32_CAM_IP}:{ESP32_CAM_PORT}/open_camera')
         frame_data = response.content
         frame_array = np.frombuffer(frame_data, dtype=np.uint8)
         # frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
@@ -193,7 +171,7 @@ async def tired():
 
 def detech():
     global result_label, ESP32_CAM_IP, ESP32_CAM_PORT
-    # result = None
+    result = None
     with app.app_context():
             train_classifier()
             sleep_sound_flag = 0
@@ -214,6 +192,7 @@ def detech():
           
             cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
             # cap = cv2.VideoCapture(ESP32_CAM_URL)
+            ret, frame = cap.read()
 
             time.sleep(1)
             start = time.time()
@@ -225,7 +204,7 @@ def detech():
     capture_path = None
 
     while True:
-        frame = get_frame_from_esp32_cam()
+        # frame = cv2.cap()
         if frame is None:
             break
         _, frame = cap.read()
@@ -315,21 +294,20 @@ def detech():
                             db.session.add(detection_result)
                             db.session.commit()
                             capture_count += 1
-                        if result_label == 'sleep':
-                            response = requests.get(ESP32_CAM_URL)   
-                        # detection_result = DetectionResult(result=result, image_path=capture_path)
+                        # if result_label == 'sleep':
+                        #     detection_result = DetectionResult(result=result, image_path=capture_path)
 
-                        # ## simpan foto ke folder
-                        # capture_filename = f"capture_{capture_count}.jpg"
-                        # capture_path = os.path.join(capture_folder, capture_filename)
-                        # cv2.imwrite(capture_path, frame)
+                        # ## simpan foto keq folder
+                        #     capture_filename = f"capture_{capture_count}.jpg"
+                        #     capture_path = os.path.join(capture_folder, capture_filename)
+                        #     cv2.imwrite(capture_path, frame)
 
                         # # update path foto
-                        # detection_result.image_path = capture_path
+                        #     detection_result.image_path = capture_path
 
-                        # db.session.add(detection_result)
-                        # db.session.commit()
-                        # capture_count += 1
+                        #     db.session.add(detection_result)
+                        #     db.session.commit()
+                        #     capture_count += 1
             else:
                 if (yawning > 20):
                     no_yawn += 1
@@ -406,26 +384,41 @@ def detech():
 
     return render_template("index.html", result=result_label)
 
+
+def control_sensor(action):
+    try:
+        esp32_cam_url = f"http://{ESP32_CAM_IP}:80/control_sensor?action={action}"
+        response = requests.get(esp32_cam_url)
+        result = response.text
+        return f"Kontrol Sensor: {result}"
+    except Exception as e:
+        return f"Error: {e}"
+        
+
 @app.route("/open_camera")
 def open():
-    global ESP32_CAM_IP, ESP32_CAM_PORT
-    ESP_CAM_URL = f'http://{ESP32_CAM_IP}:{ESP32_CAM_PORT}'
+    
+    detech()
+    # frame = detech()
     timeout = 60
-    frame = requests.get(ESP_CAM_URL)
+    # ret, frame = requests.get(ESP_CAM_URL)
     if frame is None or frame.empty():
         return "Error: Gagal mengambil citra gambar dari frame"
-    detech()
+    _,frame = cv2.read()
     print("open camera")
     data = request.get_json()
-    response = requests.get(ESP_CAM_URL)
-    frame_data = response.content
+    # response = requests.get(ESP_CAM_URL)    
     
-    
-    # frame_data = data["frame"]
+    frame_data = data["frame"]
 
 
     frame = np.array(frame_data, dtype=np.uint8).reshape(480, 640, 3)
     result = classify_frame(frame)
+    result_label = result
+    if result_label == 'sleep':
+        control_sensor('activate')
+    else:
+        control_sensor('deactivate')
     detech(frame) #meneruskan frame ke detech
     return redirect, jsonify, Response("/", {"classification": result_label}, open_camera(), mimetype='multipart/x-mixed-replace; boundary=frame', content_type='multipart/x-mixed-replace; boundary=frame', status=200, direct_passthrough=True, timeout=timeout)
 
@@ -502,7 +495,7 @@ def count_detections():
 
     # return render_template("index.html", sleep_count=sleep_count, yawning_count=yawning_count, active_count=active_count)
 
-@app.route('/start_detection')
+@app.route('/start_detection', methods=['POST'])
 def start_detection():
     # mendapatkan hasil deteksi dari model
     detech()
